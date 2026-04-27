@@ -50,6 +50,27 @@ http://localhost:15672
 
 Default credentials are `guest` / `guest`.
 
+## Pre-commit
+
+The project uses pre-commit hooks for basic code quality checks:
+
+- `flake8`
+- `black`
+- `isort`
+
+Install pre-commit and enable hooks:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+Run checks manually for all files:
+
+```bash
+pre-commit run --all-files
+```
+
 ## Migrations
 
 Create a migration:
