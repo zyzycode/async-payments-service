@@ -6,6 +6,7 @@ PAYMENT_NEW_TOTAL_PROCESSING_ATTEMPTS = 3
 
 
 def payment_exchange() -> RabbitExchange:
+    """Возвращает exchange, через который публикуются события новых платежей."""
     return RabbitExchange(
         settings.payment_exchange,
         durable=True,
@@ -13,6 +14,7 @@ def payment_exchange() -> RabbitExchange:
 
 
 def payment_dlx() -> RabbitExchange:
+    """Возвращает dead-letter exchange для окончательно упавших сообщений."""
     return RabbitExchange(
         settings.payment_dlx,
         durable=True,
@@ -20,6 +22,16 @@ def payment_dlx() -> RabbitExchange:
 
 
 def payment_new_queue() -> RabbitQueue:
+    """Возвращает основную очередь обработки новых платежей.
+
+    Очередь является quorum queue и получает события `payments.new`. Для DLQ
+    гарантии она настроена так, чтобы сообщение после 3 неуспешных обработок
+    попадало в `payment_dlx` с routing key `PAYMENT_DLQ`.
+
+    RabbitMQ quorum queue считает redelivery, а не первую доставку. Поэтому для
+    3 total processing attempts используется `x-delivery-limit = 2`: первичная
+    доставка плюс 2 повторные доставки.
+    """
     return RabbitQueue(
         settings.payment_new_queue,
         durable=True,
@@ -36,6 +48,7 @@ def payment_new_queue() -> RabbitQueue:
 
 
 def payment_dlq() -> RabbitQueue:
+    """Возвращает очередь для сообщений, не обработанных после лимита попыток."""
     return RabbitQueue(
         settings.payment_dlq,
         durable=True,

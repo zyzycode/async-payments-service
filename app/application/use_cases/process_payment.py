@@ -11,12 +11,32 @@ from app.domain.payments.entities import Payment, PaymentStatus
 
 @dataclass(slots=True)
 class ProcessPaymentUseCase:
+    """Обрабатывает платеж, полученный consumer-ом из очереди.
+
+    Use case выполняет основную бизнес-логику обработки:
+    вызывает платежный шлюз, обновляет статус платежа и отправляет webhook.
+    Если платеж уже имеет финальный статус, повторная обработка не выполняется.
+
+    Транзакции:
+        Платеж читается в короткой transaction boundary, затем gateway вызывается
+        вне транзакции БД, чтобы не держать соединение 2-5 секунд. После ответа
+        gateway статус обновляется и webhook отправляется внутри новой
+        transaction boundary. Если webhook исчерпал retry и выбросил ошибку,
+        обновление статуса откатывается, а RabbitMQ сможет повторить обработку.
+
+    Ошибки:
+        `PaymentNotFoundError` или ошибка webhook/gateway пробрасывается наружу
+        в consumer. Это нужно, чтобы сообщение было redelivered и после лимита
+        попыток ушло в DLQ.
+    """
+
     payment_repository: PaymentRepository
     payment_gateway: PaymentGateway
     webhook_client: WebhookClient
     transaction_manager: TransactionManager
 
     async def execute(self, payment_id: UUID) -> Payment:
+        """Обрабатывает платеж или возвращает текущий, если он уже финальный."""
         async with self.transaction_manager:
             payment = await self.payment_repository.get_by_id(payment_id)
             if payment is None:

@@ -10,6 +10,25 @@ from app.domain.payments.entities import Payment
 
 
 class HttpxWebhookClient(WebhookClient):
+    """Отправляет webhook клиенту с retry и экспоненциальной задержкой.
+
+    Адаптер реализует application port `WebhookClient` и является границей
+    outbound HTTP взаимодействия. Он отправляет результат обработки платежа на
+    `payment.webhook_url`.
+
+    Retry:
+        На каждый webhook выполняется до 3 попыток. Между попытками используется
+        экспоненциальная задержка: 1 секунда перед второй попыткой и 2 секунды
+        перед третьей. Если все попытки исчерпаны, выбрасывается
+        `WebhookDeliveryError`.
+
+    Гарантия обработки:
+        `ProcessPaymentUseCase` вызывает этот адаптер внутри transaction
+        boundary обновления статуса. Поэтому ошибка webhook откатывает статус
+        платежа и пробрасывается в consumer, чтобы RabbitMQ выполнил повторную
+        доставку или отправил сообщение в DLQ после лимита попыток.
+    """
+
     def __init__(
         self,
         timeout_seconds: float | None = None,
@@ -19,6 +38,18 @@ class HttpxWebhookClient(WebhookClient):
         self._max_attempts = max_attempts
 
     async def send_payment_webhook(self, payment: Payment) -> None:
+        """Отправляет webhook с результатом обработки платежа.
+
+        Args:
+            payment: Платеж с итоговым статусом и заполненным `processed_at`.
+
+        Payload:
+            `payment_id`, `status`, `amount`, `currency`, `processed_at`.
+
+        Raises:
+            WebhookDeliveryError: Если HTTP-запрос не удалось доставить после
+                всех retry.
+        """
         processed_at = payment.processed_at.isoformat() if payment.processed_at else None
         await self.send_webhook(
             url=payment.webhook_url,
@@ -32,6 +63,16 @@ class HttpxWebhookClient(WebhookClient):
         )
 
     async def send_webhook(self, url: str, payload: dict[str, Any]) -> None:
+        """Выполняет HTTP POST webhook payload на указанный URL.
+
+        Args:
+            url: URL клиента, на который нужно отправить уведомление.
+            payload: JSON-совместимое тело webhook.
+
+        Raises:
+            WebhookDeliveryError: Если все попытки завершились HTTP или network
+                ошибкой.
+        """
         last_error: Exception | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:

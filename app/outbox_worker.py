@@ -12,6 +12,14 @@ from app.core.settings import settings
 
 
 async def run() -> None:
+    """Запускает бесконечный цикл публикации outbox events.
+
+    Worker подключается к RabbitMQ, создает SQLAlchemy session и запускает
+    `OutboxPublisherUseCase`. Он нужен для гарантированной доставки событий:
+    если API сохранил payment и outbox event, но публикация в RabbitMQ не
+    произошла сразу, этот процесс повторно прочитает pending event и отправит
+    его в брокер.
+    """
     configure_logging()
     broker = RabbitBroker(settings.rabbitmq_url)
     async with broker:

@@ -21,6 +21,23 @@ class CreatePaymentCommand:
 
 @dataclass(slots=True)
 class CreatePaymentUseCase:
+    """Создает платеж с защитой от дублей и записью outbox event.
+
+    Use case не зависит от FastAPI, SQLAlchemy или RabbitMQ напрямую. Все
+    внешние действия выполняются через application ports.
+
+    Идемпотентность:
+        Дубликат определяется по `idempotency_key`, который хранится в таблице
+        `payments` и защищен уникальным индексом. При повторном запросе с тем же
+        ключом возвращается уже существующий платеж, а новый outbox event не
+        создается.
+
+    Outbox:
+        При создании нового платежа в той же application transaction создается
+        событие `payments.new` с payload `{"payment_id": ...}`. Это гарантирует,
+        что платеж и событие либо сохраняются вместе, либо вместе откатываются.
+    """
+
     payment_repository: PaymentRepository
     outbox_repository: OutboxRepository
     transaction_manager: TransactionManager
@@ -28,6 +45,7 @@ class CreatePaymentUseCase:
     payment_new_routing_key: str
 
     async def execute(self, command: CreatePaymentCommand) -> Payment:
+        """Создает платеж или возвращает существующий по `idempotency_key`."""
         async with self.transaction_manager:
             existing_payment = await self.payment_repository.get_by_idempotency_key(
                 command.idempotency_key,

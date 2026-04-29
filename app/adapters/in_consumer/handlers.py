@@ -11,12 +11,43 @@ from app.application.use_cases import ProcessPaymentUseCase
 
 
 def register_handlers(broker: RabbitBroker) -> None:
+    """Регистрирует единственный consumer обработки платежей.
+
+    Consumer читает сообщения из очереди `payments.new` и делегирует обработку
+    `ProcessPaymentUseCase`. Один обработчик выполняет весь сценарий:
+    эмуляцию платежного шлюза, обновление статуса в БД и отправку webhook.
+
+    Retry и DLQ:
+        `retry=True` заставляет FastStream пробросить ошибку обратно в RabbitMQ.
+        Очередь `payments.new` настроена как quorum queue с dead-letter exchange.
+        После 3 неуспешных попыток обработки сообщение попадает в DLQ.
+    """
+
     @broker.subscriber(
         payment_new_queue(),
         payment_exchange(),
         retry=True,
     )
     async def process_payment(message: PaymentNewMessage) -> None:
+        """Обрабатывает сообщение о новом платеже.
+
+        Args:
+            message: Сообщение `{payment_id}` из очереди `payments.new`.
+
+        Processing:
+            1. Находит платеж по `payment_id`.
+            2. Если платеж уже не `pending`, завершает обработку без повторного
+               вызова шлюза и webhook.
+            3. Вызывает эмулятор платежного шлюза: задержка 2-5 секунд,
+               вероятность успеха 90%, вероятность отказа 10%.
+            4. Обновляет статус платежа в БД.
+            5. Отправляет webhook клиенту.
+
+        Ошибки:
+            Если gateway, БД или webhook завершаются ошибкой, исключение
+            пробрасывается наружу. RabbitMQ выполняет повторную доставку, а
+            после 3 неуспешных попыток отправляет сообщение в DLQ.
+        """
         async with async_session_factory() as session:
             use_case = ProcessPaymentUseCase(
                 payment_repository=SqlAlchemyPaymentRepository(session),
