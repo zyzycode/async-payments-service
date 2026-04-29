@@ -5,5 +5,7 @@ pydantic-settings==2.7.1
 SQLAlchemy==2.0.36
 asyncpg==0.30.0
 alembic==1.14.0
-faststream[rabbit]==0.5.33
+faststream[rabbit,cli]==0.5.33
 httpx==0.28.1
+pytest==8.3.4
+pytest-asyncio==0.25.0
