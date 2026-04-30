@@ -133,10 +133,31 @@ class InMemoryOutboxRepository:
         return event
 
     async def get_pending_events(self, limit: int, now: datetime | None = None) -> list[OutboxEvent]:
-        return self.events[:limit]
+        now = now or datetime.now(timezone.utc)
+        return [
+            event
+            for event in self.events
+            if event.status == OutboxEventStatus.PENDING and (event.next_retry_at is None or event.next_retry_at <= now)
+        ][:limit]
 
     async def mark_as_published(self, event_id: UUID) -> None:
-        return None
+        event = self._get_event(event_id)
+        self._replace_event(
+            event_id,
+            OutboxEvent(
+                id=event.id,
+                exchange=event.exchange,
+                routing_key=event.routing_key,
+                payload=event.payload,
+                status=OutboxEventStatus.PUBLISHED,
+                created_at=event.created_at,
+                published_at=datetime.now(timezone.utc),
+                failed_at=None,
+                next_retry_at=None,
+                attempts=event.attempts,
+                last_error=event.last_error,
+            ),
+        )
 
     async def mark_as_failed(
         self,
@@ -144,10 +165,39 @@ class InMemoryOutboxRepository:
         error: str,
         next_retry_at: datetime | None = None,
     ) -> None:
-        return None
+        event = self._get_event(event_id)
+        self._replace_event(
+            event_id,
+            OutboxEvent(
+                id=event.id,
+                exchange=event.exchange,
+                routing_key=event.routing_key,
+                payload=event.payload,
+                status=OutboxEventStatus.PENDING if next_retry_at else OutboxEventStatus.FAILED,
+                created_at=event.created_at,
+                published_at=event.published_at,
+                failed_at=datetime.now(timezone.utc),
+                next_retry_at=next_retry_at,
+                attempts=event.attempts + 1,
+                last_error=error,
+            ),
+        )
 
     def _is_transaction_active(self) -> bool:
         return self.transaction_manager.active if self.transaction_manager else False
+
+    def _get_event(self, event_id: UUID) -> OutboxEvent:
+        for event in self.events:
+            if event.id == event_id:
+                return event
+        raise ValueError(f"Outbox event {event_id} not found")
+
+    def _replace_event(self, event_id: UUID, replacement: OutboxEvent) -> None:
+        for index, event in enumerate(self.events):
+            if event.id == event_id:
+                self.events[index] = replacement
+                return
+        raise ValueError(f"Outbox event {event_id} not found")
 
 
 class FakePaymentGateway:
@@ -174,3 +224,25 @@ class FakeWebhookClient:
         self.calls += 1
         if self.exc is not None:
             raise self.exc
+
+
+class FakeMessagePublisher:
+    def __init__(self, exc: Exception | None = None) -> None:
+        self.exc = exc
+        self.messages: list[dict] = []
+
+    async def publish(
+        self,
+        exchange: str,
+        routing_key: str,
+        message: dict,
+    ) -> None:
+        if self.exc is not None:
+            raise self.exc
+        self.messages.append(
+            {
+                "exchange": exchange,
+                "routing_key": routing_key,
+                "message": message,
+            },
+        )

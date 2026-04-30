@@ -143,6 +143,26 @@ pre-commit install
 pre-commit run --all-files
 ```
 
+## Тесты
+
+Быстрый набор unit/API тестов запускается без Docker:
+
+```bash
+pytest
+```
+
+В него входят use-case тесты, API тесты и легкий happy-path сценарий:
+`POST payment -> outbox publish -> processing -> webhook -> GET payment`.
+
+Опциональный integration test для PostgreSQL проверяет реальный SQLAlchemy
+outbox repository и `FOR UPDATE SKIP LOCKED`. Его удобно запускать внутри
+Docker network:
+
+```bash
+docker compose run --rm -e RUN_POSTGRES_INTEGRATION_TESTS=1 api \
+  pytest tests/test_outbox_repository_integration.py -q
+```
+
 ## Примеры curl
 
 Создать платеж:

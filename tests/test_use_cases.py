@@ -5,14 +5,19 @@ import pytest
 from app.application.errors import (
     DuplicateIdempotencyKeyError,
     IdempotencyConflictError,
+    PaymentNotFoundError,
 )
+from app.application.ports.types import OutboxEventCreateData
 from app.application.use_cases.create_payment import (
     CreatePaymentCommand,
     CreatePaymentUseCase,
 )
+from app.application.use_cases.get_payment import GetPaymentUseCase
+from app.application.use_cases.outbox_publisher import OutboxPublisherUseCase
 from app.application.use_cases.process_payment import ProcessPaymentUseCase
 from app.domain.payments.entities import Currency, PaymentStatus
 from tests.fakes import (
+    FakeMessagePublisher,
     FakePaymentGateway,
     FakeTransactionManager,
     FakeWebhookClient,
@@ -47,6 +52,14 @@ def create_use_case(
         transaction_manager=transaction_manager,
         payment_exchange=PAYMENT_EXCHANGE,
         payment_new_routing_key=PAYMENT_NEW_ROUTING_KEY,
+    )
+
+
+def create_outbox_event_data(payload: dict) -> OutboxEventCreateData:
+    return OutboxEventCreateData(
+        exchange=PAYMENT_EXCHANGE,
+        routing_key=PAYMENT_NEW_ROUTING_KEY,
+        payload=payload,
     )
 
 
@@ -145,6 +158,121 @@ async def test_create_payment_returns_existing_after_concurrent_unique_conflict(
 
     assert payment.id == payment_repository._hidden_payment.id
     assert len(outbox_repository.events) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_payment_returns_existing_payment() -> None:
+    payment = make_payment()
+    transaction_manager = FakeTransactionManager()
+    payment_repository = InMemoryPaymentRepository(transaction_manager)
+    payment_repository.add(payment)
+    use_case = GetPaymentUseCase(
+        payment_repository=payment_repository,
+        transaction_manager=transaction_manager,
+    )
+
+    result = await use_case.execute(payment.id)
+
+    assert result.id == payment.id
+    assert transaction_manager.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_get_payment_raises_when_payment_not_found() -> None:
+    payment = make_payment()
+    transaction_manager = FakeTransactionManager()
+    payment_repository = InMemoryPaymentRepository(transaction_manager)
+    use_case = GetPaymentUseCase(
+        payment_repository=payment_repository,
+        transaction_manager=transaction_manager,
+    )
+
+    with pytest.raises(PaymentNotFoundError):
+        await use_case.execute(payment.id)
+
+    assert transaction_manager.rollbacks == 1
+
+
+@pytest.mark.asyncio
+async def test_outbox_publisher_publishes_pending_event_and_marks_it_published() -> None:
+    transaction_manager = FakeTransactionManager()
+    outbox_repository = InMemoryOutboxRepository(transaction_manager)
+    publisher = FakeMessagePublisher()
+    use_case = OutboxPublisherUseCase(
+        outbox_repository=outbox_repository,
+        message_publisher=publisher,
+        transaction_manager=transaction_manager,
+        poll_interval_seconds=0.01,
+    )
+    event = await outbox_repository.create_event(
+        data=create_outbox_event_data(payload={"payment_id": "payment-001"}),
+    )
+
+    processed_count = await use_case.publish_pending_once()
+
+    stored_event = outbox_repository.events[0]
+    assert processed_count == 1
+    assert publisher.messages == [
+        {
+            "exchange": PAYMENT_EXCHANGE,
+            "routing_key": PAYMENT_NEW_ROUTING_KEY,
+            "message": {"payment_id": "payment-001"},
+        },
+    ]
+    assert stored_event.id == event.id
+    assert stored_event.status.value == "published"
+    assert stored_event.published_at is not None
+
+
+@pytest.mark.asyncio
+async def test_outbox_publisher_schedules_retry_when_publish_fails() -> None:
+    transaction_manager = FakeTransactionManager()
+    outbox_repository = InMemoryOutboxRepository(transaction_manager)
+    publisher = FakeMessagePublisher(exc=RuntimeError("rabbit is down"))
+    use_case = OutboxPublisherUseCase(
+        outbox_repository=outbox_repository,
+        message_publisher=publisher,
+        transaction_manager=transaction_manager,
+        poll_interval_seconds=0.01,
+    )
+    await outbox_repository.create_event(
+        data=create_outbox_event_data(payload={"payment_id": "payment-001"}),
+    )
+
+    processed_count = await use_case.publish_pending_once()
+
+    stored_event = outbox_repository.events[0]
+    assert processed_count == 1
+    assert stored_event.status.value == "pending"
+    assert stored_event.attempts == 1
+    assert stored_event.last_error == "rabbit is down"
+    assert stored_event.next_retry_at is not None
+
+
+@pytest.mark.asyncio
+async def test_outbox_publisher_marks_event_failed_after_max_attempts() -> None:
+    transaction_manager = FakeTransactionManager()
+    outbox_repository = InMemoryOutboxRepository(transaction_manager)
+    publisher = FakeMessagePublisher(exc=RuntimeError("rabbit is down"))
+    use_case = OutboxPublisherUseCase(
+        outbox_repository=outbox_repository,
+        message_publisher=publisher,
+        transaction_manager=transaction_manager,
+        poll_interval_seconds=0.01,
+        max_attempts=1,
+    )
+    await outbox_repository.create_event(
+        data=create_outbox_event_data(payload={"payment_id": "payment-001"}),
+    )
+
+    processed_count = await use_case.publish_pending_once()
+
+    stored_event = outbox_repository.events[0]
+    assert processed_count == 1
+    assert stored_event.status.value == "failed"
+    assert stored_event.attempts == 1
+    assert stored_event.last_error == "rabbit is down"
+    assert stored_event.next_retry_at is None
 
 
 @pytest.mark.asyncio

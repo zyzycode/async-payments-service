@@ -194,3 +194,39 @@ async def test_x_api_key_is_required() -> None:
         response = await client.get(f"/api/v1/payments/{uuid4()}")
 
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_wrong_x_api_key_returns_401() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/api/v1/payments/{uuid4()}",
+            headers={"X-API-Key": "wrong-key"},
+        )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_create_payment_requires_idempotency_key() -> None:
+    fake_use_case = FakeCreatePaymentUseCase()
+    app.dependency_overrides[get_create_payment_use_case] = create_payment_dependency(fake_use_case)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/payments",
+            headers={"X-API-Key": "test-api-key"},
+            json={
+                "amount": "100.50",
+                "currency": "RUB",
+                "description": "Demo payment",
+                "metadata": {"order_id": "order-001"},
+                "webhook_url": "https://example.com/webhook",
+            },
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 422
