@@ -16,6 +16,7 @@ def make_payment(
     payment_id: UUID | None = None,
     status: PaymentStatus = PaymentStatus.PENDING,
     idempotency_key: str = "idem-key",
+    request_hash: str = "request-hash",
 ) -> Payment:
     return Payment(
         id=payment_id or uuid4(),
@@ -25,6 +26,7 @@ def make_payment(
         metadata={"order_id": "order-001"},
         status=status,
         idempotency_key=idempotency_key,
+        request_hash=request_hash,
         webhook_url="https://example.com/webhook",
         created_at=datetime.now(timezone.utc),
         processed_at=datetime.now(timezone.utc) if status != PaymentStatus.PENDING else None,
@@ -73,6 +75,7 @@ class InMemoryPaymentRepository:
             metadata=data.metadata,
             status=PaymentStatus.PENDING,
             idempotency_key=data.idempotency_key,
+            request_hash=data.request_hash,
             webhook_url=data.webhook_url,
             created_at=datetime.now(timezone.utc),
             processed_at=None,

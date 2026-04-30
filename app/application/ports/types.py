@@ -15,6 +15,7 @@ class PaymentCreateData:
     description: str
     metadata: dict[str, Any]
     idempotency_key: str
+    request_hash: str
     webhook_url: str
 
 

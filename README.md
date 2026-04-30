@@ -42,8 +42,8 @@ Application layer не импортирует FastAPI, SQLAlchemy, FastStream и
 ## Схема Обработки Платежа
 
 1. `POST /api/v1/payments` получает данные платежа и `Idempotency-Key`.
-2. `CreatePaymentUseCase` проверяет платеж по `idempotency_key`.
-3. Если платеж уже есть, возвращается существующий платеж.
+2. `CreatePaymentUseCase` считает `request_hash` и проверяет платеж по `idempotency_key`.
+3. Если платеж уже есть и `request_hash` совпадает, возвращается существующий платеж. Если ключ повторно использован с другим payload, возвращается `409 Conflict`.
 4. Если платежа нет, в одной транзакции создаются:
    - запись в `payments`;
    - запись в `outbox` с событием `payments.new`.
@@ -167,6 +167,8 @@ curl -i http://localhost:8080/api/v1/payments/<payment_id> \
   -H "X-API-Key: change-me"
 ```
 
+Повторное использование `Idempotency-Key` с другим телом запроса вернет `409 Conflict`.
+
 ## Как Проверить Webhook
 
 1. Откройте `https://webhook.site`.
@@ -196,7 +198,7 @@ curl -i http://localhost:8080/api/v1/payments/<payment_id> \
 
 ## Гарантии
 
-- **Idempotency**: повторный `POST` с тем же `Idempotency-Key` возвращает уже созданный платеж и не создает дубль.
+- **Idempotency**: повторный `POST` с тем же `Idempotency-Key` и тем же `request_hash` возвращает уже созданный платеж и не создает дубль. Тот же ключ с другим payload возвращает `409 Conflict`; конкурентная гонка дополнительно защищена unique index в БД.
 - **Outbox**: платеж и событие `payments.new` сохраняются в одной транзакции.
 - **Retry**: webhook adapter делает 3 попытки отправки с паузами `1s` и `2s` между попытками; consumer пробрасывает ошибку наружу, чтобы RabbitMQ повторил обработку сообщения.
 - **DLQ**: очередь `payments.new` настроена так, чтобы после 3 неуспешных попыток обработки сообщение попадало в `payments.dlq`.

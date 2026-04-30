@@ -27,6 +27,7 @@ class Payment:
     metadata: dict[str, Any]
     status: PaymentStatus
     idempotency_key: str
+    request_hash: str
     webhook_url: str
     created_at: datetime
     processed_at: datetime | None = None

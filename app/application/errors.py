@@ -7,6 +7,20 @@ class PaymentNotFoundError(Exception):
         super().__init__(f"Payment {payment_id} not found")
 
 
+class DuplicateIdempotencyKeyError(Exception):
+    def __init__(self, idempotency_key: str) -> None:
+        self.idempotency_key = idempotency_key
+        super().__init__(f"Payment with idempotency key {idempotency_key} already exists")
+
+
+class IdempotencyConflictError(Exception):
+    def __init__(self, idempotency_key: str) -> None:
+        self.idempotency_key = idempotency_key
+        super().__init__(
+            f"Idempotency key {idempotency_key} was reused with a different request payload",
+        )
+
+
 class RepositoryCalledOutsideTransactionError(Exception):
     pass
 

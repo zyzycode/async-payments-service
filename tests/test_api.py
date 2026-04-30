@@ -7,7 +7,7 @@ from app.adapters.in_api.dependencies import (
     get_create_payment_use_case,
     get_get_payment_use_case,
 )
-from app.application.errors import PaymentNotFoundError
+from app.application.errors import IdempotencyConflictError, PaymentNotFoundError
 from app.domain.payments.entities import Payment
 from app.main import app
 from tests.fakes import make_payment
@@ -36,6 +36,11 @@ class FakeGetPaymentUseCase:
         if payment is None:
             raise PaymentNotFoundError(payment_id)
         return payment
+
+
+class ConflictCreatePaymentUseCase:
+    async def execute(self, command) -> Payment:
+        raise IdempotencyConflictError(command.idempotency_key)
 
 
 def create_payment_dependency(fake_use_case: FakeCreatePaymentUseCase):
@@ -110,6 +115,35 @@ async def test_repeated_post_with_same_idempotency_key_returns_same_payment() ->
     assert first_response.status_code == 202
     assert second_response.status_code == 202
     assert first_response.json()["payment_id"] == second_response.json()["payment_id"]
+
+
+@pytest.mark.asyncio
+async def test_post_with_same_idempotency_key_and_different_payload_returns_409() -> None:
+    app.dependency_overrides[get_create_payment_use_case] = create_payment_dependency(
+        ConflictCreatePaymentUseCase(),
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/payments",
+            headers={
+                "X-API-Key": "test-api-key",
+                "Idempotency-Key": "idem-conflict",
+            },
+            json={
+                "amount": "100.50",
+                "currency": "RUB",
+                "description": "Demo payment",
+                "metadata": {"order_id": "order-001"},
+                "webhook_url": "https://example.com/webhook",
+            },
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert "idem-conflict" in response.json()["detail"]
 
 
 @pytest.mark.asyncio

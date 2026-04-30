@@ -24,6 +24,7 @@ class PaymentModel(Base):
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB)
     status: Mapped[str] = mapped_column(String(length=32))
     idempotency_key: Mapped[str] = mapped_column(String(length=255))
+    request_hash: Mapped[str] = mapped_column(String(length=64))
     webhook_url: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

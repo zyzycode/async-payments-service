@@ -2,10 +2,12 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.out_db.models import PaymentModel
 from app.adapters.out_db.transaction_boundary import ensure_application_transaction
+from app.application.errors import DuplicateIdempotencyKeyError
 from app.application.ports.payment_repository import PaymentRepository
 from app.application.ports.types import PaymentCreateData
 from app.domain.payments.entities import Currency, Payment, PaymentStatus
@@ -20,6 +22,7 @@ def payment_to_domain(model: PaymentModel) -> Payment:
         metadata=model.metadata_,
         status=PaymentStatus(model.status),
         idempotency_key=model.idempotency_key,
+        request_hash=model.request_hash,
         webhook_url=model.webhook_url,
         created_at=model.created_at,
         processed_at=model.processed_at,
@@ -40,12 +43,18 @@ class SqlAlchemyPaymentRepository(PaymentRepository):
             metadata_=data.metadata,
             status=PaymentStatus.PENDING.value,
             idempotency_key=data.idempotency_key,
+            request_hash=data.request_hash,
             webhook_url=data.webhook_url,
             created_at=datetime.now(timezone.utc),
             processed_at=None,
         )
         self._session.add(model)
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            if self._is_idempotency_key_violation(exc):
+                raise DuplicateIdempotencyKeyError(data.idempotency_key) from exc
+            raise
         return payment_to_domain(model)
 
     async def get_by_id(self, payment_id: UUID) -> Payment | None:
@@ -80,3 +89,12 @@ class SqlAlchemyPaymentRepository(PaymentRepository):
         model.processed_at = processed_at or datetime.now(timezone.utc)
         await self._session.flush()
         return payment_to_domain(model)
+
+    @staticmethod
+    def _is_idempotency_key_violation(exc: IntegrityError) -> bool:
+        error_text = str(exc.orig)
+        return (
+            "ix_payments_idempotency_key" in error_text
+            or "payments_idempotency_key" in error_text
+            or "idempotency_key" in error_text
+        )

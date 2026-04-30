@@ -13,7 +13,7 @@ from app.adapters.in_api.schemas import (
     CreatePaymentResponse,
     PaymentResponse,
 )
-from app.application.errors import PaymentNotFoundError
+from app.application.errors import IdempotencyConflictError, PaymentNotFoundError
 from app.application.use_cases import (
     CreatePaymentCommand,
     CreatePaymentUseCase,
@@ -44,6 +44,9 @@ async def healthcheck() -> dict[str, str]:
         status.HTTP_422_UNPROCESSABLE_ENTITY: {
             "description": "Не передан Idempotency-Key или тело запроса не прошло валидацию.",
         },
+        status.HTTP_409_CONFLICT: {
+            "description": "Idempotency-Key повторно использован с другим телом запроса.",
+        },
     },
 )
 async def create_payment(
@@ -59,8 +62,9 @@ async def create_payment(
 
     Идемпотентность:
         Заголовок `Idempotency-Key` обязателен. Если платеж с таким ключом уже
-        существует, новый платеж и outbox event не создаются, а клиент получает
-        данные ранее созданного платежа.
+        существует и hash тела запроса совпадает, новый платеж и outbox event не
+        создаются, а клиент получает данные ранее созданного платежа. Если тот
+        же ключ использован с другим телом запроса, возвращается `409 Conflict`.
 
     Возможные статусы платежа:
         `pending` сразу после создания, затем `succeeded` или `failed` после
@@ -68,21 +72,28 @@ async def create_payment(
 
     Ошибки:
         401: отсутствует или неверен `X-API-Key`.
+        409: `Idempotency-Key` повторно использован с другим телом запроса.
         422: не передан `Idempotency-Key` или тело запроса не прошло валидацию.
 
     Returns:
         Ответ `202 Accepted` с `payment_id`, текущим статусом и датой создания.
     """
-    payment = await use_case.execute(
-        CreatePaymentCommand(
-            amount=request.amount,
-            currency=request.currency,
-            description=request.description,
-            metadata=request.metadata,
-            webhook_url=str(request.webhook_url),
-            idempotency_key=idempotency_key,
-        ),
-    )
+    try:
+        payment = await use_case.execute(
+            CreatePaymentCommand(
+                amount=request.amount,
+                currency=request.currency,
+                description=request.description,
+                metadata=request.metadata,
+                webhook_url=str(request.webhook_url),
+                idempotency_key=idempotency_key,
+            ),
+        )
+    except IdempotencyConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     return CreatePaymentResponse.from_domain(payment)
 
 
