@@ -192,15 +192,16 @@ curl -i http://localhost:8080/api/v1/payments/<payment_id> \
 1. Запустите сервисы через `docker compose up --build`; миграции применит сервис `migrate`.
 2. Откройте RabbitMQ Management UI: `http://localhost:15672`.
 3. Перейдите в раздел `Queues`.
-4. Найдите очередь `payments.dlq`.
-5. Чтобы принудительно проверить DLQ, можно указать недоступный `webhook_url`, например локальный адрес, который не принимает запросы.
-6. Consumer выполнит 3 попытки обработки: первая сразу, вторая после `1s`, третья после `2s`.
-7. После 3 неуспешных обработок сообщение должно оказаться в `payments.dlq`.
+4. Проверьте очереди `payments.new`, `payments.new.retry.1s`, `payments.new.retry.2s` и `payments.dlq`.
+5. У `payments.new` должны быть аргументы `x-dead-letter-exchange`, `x-dead-letter-routing-key` и `x-delivery-limit`.
+6. Чтобы принудительно проверить DLQ, можно указать недоступный `webhook_url`, например локальный адрес, который не принимает запросы.
+7. Consumer выполнит 3 попытки обработки: первая сразу, вторая после `1s`, третья после `2s`.
+8. После 3 неуспешных обработок сообщение должно оказаться в `payments.dlq`.
 
 ## Гарантии
 
 - **Idempotency**: повторный `POST` с тем же `Idempotency-Key` и тем же `request_hash` возвращает уже созданный платеж и не создает дубль. Тот же ключ с другим payload возвращает `409 Conflict`; конкурентная гонка дополнительно защищена unique index в БД.
 - **Outbox**: платеж и событие `payments.new` сохраняются в одной транзакции.
-- **Retry обработки сообщения**: consumer явно реализует 3 попытки обработки платежа через RabbitMQ retry queues. Backoff между попытками: `1s`, затем `2s`; после TTL сообщение возвращается в `payments.new`.
+- **Retry обработки сообщения**: consumer явно реализует 3 попытки обработки платежа через RabbitMQ retry queues: `payments.new.retry.1s` и `payments.new.retry.2s`. Backoff между попытками: `1s`, затем `2s`; после TTL сообщение возвращается в `payments.new`.
 - **Retry webhook**: webhook adapter внутри каждой обработки делает 3 HTTP-попытки отправки с паузами `1s` и `2s` между попытками.
-- **DLQ**: после 3 неуспешных попыток обработки consumer публикует сообщение в dead-letter exchange, откуда оно попадает в `payments.dlq`.
+- **DLQ**: DLQ реализована через RabbitMQ DLX/DLQ topology. После 3 неуспешных попыток обработки consumer публикует сообщение в dead-letter exchange, откуда оно попадает в `payments.dlq`. У основной очереди `payments.new` также настроены `x-dead-letter-exchange`, `x-dead-letter-routing-key` и `x-delivery-limit`; это safety net на случай unexpected nack/redelivery вне контролируемой retry policy.
