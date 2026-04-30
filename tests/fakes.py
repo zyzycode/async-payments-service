@@ -161,11 +161,16 @@ class FakePaymentGateway:
 
 
 class FakeWebhookClient:
-    def __init__(self) -> None:
+    def __init__(self, exc: Exception | None = None) -> None:
         self.calls = 0
+        self.exc = exc
 
     async def send_payment_webhook(self, payment: Payment) -> None:
         self.calls += 1
+        if self.exc is not None:
+            raise self.exc
 
     async def send_webhook(self, url: str, payload: dict) -> None:
         self.calls += 1
+        if self.exc is not None:
+            raise self.exc

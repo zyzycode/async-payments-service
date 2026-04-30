@@ -49,10 +49,11 @@ Application layer не импортирует FastAPI, SQLAlchemy, FastStream и
    - запись в `outbox` с событием `payments.new`.
 5. `outbox-worker` читает pending outbox events и публикует сообщение в RabbitMQ.
 6. `consumer` читает очередь `payments.new`.
-7. `ProcessPaymentUseCase` вызывает эмуляцию payment gateway.
-8. Статус платежа обновляется в БД.
+7. Если платеж еще `pending`, `ProcessPaymentUseCase` вызывает эмуляцию payment gateway.
+8. Статус платежа обновляется в БД и фиксируется до отправки webhook.
 9. Сервис отправляет webhook клиенту.
-10. Если обработка падает, consumer публикует сообщение в retry queue с задержкой. Повторы обработки идут с backoff `1s`, затем `2s`; после 3 неуспешных обработок сообщение уходит в DLQ.
+10. Если webhook падает после сохранения финального статуса, повторная доставка сообщения не вызывает gateway заново, а повторяет только webhook.
+11. Если обработка падает, consumer публикует сообщение в retry queue с задержкой. Повторы обработки идут с backoff `1s`, затем `2s`; после 3 неуспешных обработок сообщение уходит в DLQ.
 
 ## Переменные Окружения
 
@@ -196,7 +197,8 @@ curl -i http://localhost:8080/api/v1/payments/<payment_id> \
 5. У `payments.new` должны быть аргументы `x-dead-letter-exchange`, `x-dead-letter-routing-key` и `x-delivery-limit`.
 6. Чтобы принудительно проверить DLQ, можно указать недоступный `webhook_url`, например локальный адрес, который не принимает запросы.
 7. Consumer выполнит 3 попытки обработки: первая сразу, вторая после `1s`, третья после `2s`.
-8. После 3 неуспешных обработок сообщение должно оказаться в `payments.dlq`.
+8. После сохранения финального статуса retry из-за недоступного webhook будет повторять только отправку webhook, без повторного вызова payment gateway.
+9. После 3 неуспешных обработок сообщение должно оказаться в `payments.dlq`.
 
 ## Гарантии
 
@@ -204,4 +206,5 @@ curl -i http://localhost:8080/api/v1/payments/<payment_id> \
 - **Outbox**: платеж и событие `payments.new` сохраняются в одной транзакции.
 - **Retry обработки сообщения**: consumer явно реализует 3 попытки обработки платежа через RabbitMQ retry queues: `payments.new.retry.1s` и `payments.new.retry.2s`. Backoff между попытками: `1s`, затем `2s`; после TTL сообщение возвращается в `payments.new`.
 - **Retry webhook**: webhook adapter внутри каждой обработки делает 3 HTTP-попытки отправки с паузами `1s` и `2s` между попытками.
+- **Финальный статус перед webhook**: итоговый статус платежа сохраняется до отправки webhook. Если webhook не доставлен, retry сообщения повторяет webhook для уже финального платежа и не запускает payment gateway повторно.
 - **DLQ**: DLQ реализована через RabbitMQ DLX/DLQ topology. После 3 неуспешных попыток обработки consumer публикует сообщение в dead-letter exchange, откуда оно попадает в `payments.dlq`. У основной очереди `payments.new` также настроены `x-dead-letter-exchange`, `x-dead-letter-routing-key` и `x-delivery-limit`; это safety net на случай unexpected nack/redelivery вне контролируемой retry policy.

@@ -15,14 +15,16 @@ class ProcessPaymentUseCase:
 
     Use case выполняет основную бизнес-логику обработки:
     вызывает платежный шлюз, обновляет статус платежа и отправляет webhook.
-    Если платеж уже имеет финальный статус, повторная обработка не выполняется.
+    Если платеж уже имеет финальный статус, gateway повторно не вызывается,
+    а повторяется только webhook.
 
     Транзакции:
         Платеж читается в короткой transaction boundary, затем gateway вызывается
         вне транзакции БД, чтобы не держать соединение 2-5 секунд. После ответа
-        gateway статус обновляется и webhook отправляется внутри новой
-        transaction boundary. Если webhook исчерпал retry и выбросил ошибку,
-        обновление статуса откатывается, а RabbitMQ сможет повторить обработку.
+        gateway итоговый статус сохраняется в отдельной transaction boundary.
+        Webhook отправляется уже после фиксации статуса. Если webhook исчерпал
+        retry и выбросил ошибку, статус платежа остается финальным, а повторная
+        доставка сообщения повторит только webhook.
 
     Ошибки:
         `PaymentNotFoundError` или ошибка webhook/gateway пробрасывается наружу
@@ -36,17 +38,31 @@ class ProcessPaymentUseCase:
     transaction_manager: TransactionManager
 
     async def execute(self, payment_id: UUID) -> Payment:
-        """Обрабатывает платеж или возвращает текущий, если он уже финальный."""
+        """Обрабатывает pending платеж или повторяет webhook для финального."""
+        payment = await self._get_payment(payment_id)
+
+        if payment.status == PaymentStatus.PENDING:
+            gateway_result = await self.payment_gateway.process_payment(payment)
+            payment = await self._save_gateway_result(
+                payment_id=payment.id,
+                status=gateway_result.status,
+            )
+
+        await self.webhook_client.send_payment_webhook(payment)
+        return payment
+
+    async def _get_payment(self, payment_id: UUID) -> Payment:
         async with self.transaction_manager:
             payment = await self.payment_repository.get_by_id(payment_id)
             if payment is None:
                 raise PaymentNotFoundError(payment_id)
+            return payment
 
-            if payment.status != PaymentStatus.PENDING:
-                return payment
-
-        gateway_result = await self.payment_gateway.process_payment(payment)
-
+    async def _save_gateway_result(
+        self,
+        payment_id: UUID,
+        status: PaymentStatus,
+    ) -> Payment:
         async with self.transaction_manager:
             fresh_payment = await self.payment_repository.get_by_id(payment_id)
             if fresh_payment is None:
@@ -55,9 +71,7 @@ class ProcessPaymentUseCase:
             if fresh_payment.status != PaymentStatus.PENDING:
                 return fresh_payment
 
-            processed_payment = await self.payment_repository.update_status(
+            return await self.payment_repository.update_status(
                 payment_id=fresh_payment.id,
-                status=gateway_result.status,
+                status=status,
             )
-            await self.webhook_client.send_payment_webhook(processed_payment)
-            return processed_payment

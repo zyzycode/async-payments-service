@@ -23,10 +23,10 @@ class HttpxWebhookClient(WebhookClient):
         `WebhookDeliveryError`.
 
     Гарантия обработки:
-        `ProcessPaymentUseCase` вызывает этот адаптер внутри transaction
-        boundary обновления статуса. Поэтому ошибка webhook откатывает статус
-        платежа и пробрасывается в consumer, чтобы RabbitMQ выполнил повторную
-        доставку или отправил сообщение в DLQ после лимита попыток.
+        `ProcessPaymentUseCase` вызывает этот адаптер после фиксации итогового
+        статуса платежа в БД. Поэтому ошибка webhook пробрасывается в consumer,
+        но не откатывает статус: повторная доставка сообщения повторит только
+        webhook и не будет заново вызывать payment gateway.
     """
 
     def __init__(

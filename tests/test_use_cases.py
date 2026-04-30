@@ -149,7 +149,9 @@ async def test_create_payment_returns_existing_after_concurrent_unique_conflict(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [PaymentStatus.SUCCEEDED, PaymentStatus.FAILED])
-async def test_process_payment_does_not_process_finished_payment_again(status: PaymentStatus) -> None:
+async def test_process_payment_retries_webhook_for_finished_payment_without_gateway(
+    status: PaymentStatus,
+) -> None:
     payment = make_payment(status=status)
     transaction_manager = FakeTransactionManager()
     payment_repository = InMemoryPaymentRepository(transaction_manager)
@@ -168,5 +170,57 @@ async def test_process_payment_does_not_process_finished_payment_again(status: P
     assert result.id == payment.id
     assert result.status == status
     assert gateway.calls == 0
-    assert webhook_client.calls == 0
+    assert webhook_client.calls == 1
     assert payment_repository.update_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_process_payment_updates_pending_payment_before_webhook() -> None:
+    payment = make_payment(status=PaymentStatus.PENDING)
+    transaction_manager = FakeTransactionManager()
+    payment_repository = InMemoryPaymentRepository(transaction_manager)
+    payment_repository.add(payment)
+    gateway = FakePaymentGateway(status=PaymentStatus.SUCCEEDED)
+    webhook_client = FakeWebhookClient()
+    use_case = ProcessPaymentUseCase(
+        payment_repository=payment_repository,
+        payment_gateway=gateway,
+        webhook_client=webhook_client,
+        transaction_manager=transaction_manager,
+    )
+
+    result = await use_case.execute(payment.id)
+
+    assert result.id == payment.id
+    assert result.status == PaymentStatus.SUCCEEDED
+    assert result.processed_at is not None
+    assert gateway.calls == 1
+    assert webhook_client.calls == 1
+    assert payment_repository.update_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_process_payment_keeps_final_status_when_webhook_fails() -> None:
+    payment = make_payment(status=PaymentStatus.PENDING)
+    transaction_manager = FakeTransactionManager()
+    payment_repository = InMemoryPaymentRepository(transaction_manager)
+    payment_repository.add(payment)
+    gateway = FakePaymentGateway(status=PaymentStatus.SUCCEEDED)
+    webhook_client = FakeWebhookClient(exc=RuntimeError("webhook failed"))
+    use_case = ProcessPaymentUseCase(
+        payment_repository=payment_repository,
+        payment_gateway=gateway,
+        webhook_client=webhook_client,
+        transaction_manager=transaction_manager,
+    )
+
+    with pytest.raises(RuntimeError, match="webhook failed"):
+        await use_case.execute(payment.id)
+
+    stored_payment = await payment_repository.get_by_id(payment.id)
+    assert stored_payment is not None
+    assert stored_payment.status == PaymentStatus.SUCCEEDED
+    assert stored_payment.processed_at is not None
+    assert gateway.calls == 1
+    assert webhook_client.calls == 1
+    assert payment_repository.update_calls == 1
